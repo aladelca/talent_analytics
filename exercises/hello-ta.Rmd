@@ -1,0 +1,32 @@
+---
+title: "hello-ta"
+output:
+  md_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+date: "2024-01-09"
+---
+
+## Load libraries
+
+```{r setup, include=FALSE}
+library('tidyverse')
+library('ggplot2')
+```
+
+## Get data
+
+```{r cars}
+summary(mtcars)
+```
+
+## Including Plots
+
+Include plot
+
+```{r pressure, echo=FALSE}
+ggplot(data = mtcars, aes (x = hp, y = drat)) + geom_point()
+```
+
+
