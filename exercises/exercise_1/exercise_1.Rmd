@@ -1,0 +1,30 @@
+---
+title: "Exercise 1"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+library('ggplot2')
+library(tidyr)
+```
+
+## Google Study
+
+
+
+## Activity 
+
+The performance of the three employees is the same, so the intervention has no effect
+
+
+```{r pressure, echo=FALSE}
+data = read.csv('performance_data.csv')
+df_long = gather(data, key = "worker", value = "performance", worker1, worker2, worker3)
+
+ggplot(data = df_long, aes(x = performance, fill = worker)) + geom_histogram() + theme_minimal()
+
+
+```
+
