@@ -1,0 +1,337 @@
+---
+title: "Exercise 2"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+date: "2024-01-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Group members:
+
+* Tashfeen Ahmed
+* Adrian Alarcon
+* Yvan Kammelu
+* Zhicheng Zhong
+
+
+```{r}
+#install.packages(c("arrow","gender", "wru", "lubridate", "gtsummary"))
+# Load required libraries
+library(gender)
+library(wru)
+library(lubridate)
+library(dplyr)
+library(gtsummary)
+library(arrow)
+library(tidyr)
+library(zoo)
+library(purrr)
+
+
+```
+
+```{r}
+data<- read_feather("app_data_starter.feather")
+```
+
+
+
+```{r}
+# Task 1: Create individual-level variables
+examiner_names <- data %>% distinct(examiner_name_first)
+
+examiner_names
+```
+
+## Obtaining gender of the examiner
+
+Using the `gender` package, we identify the gender of the examiner based on the first name, according to the documentation.
+
+```{r}
+# get a table of names and gender
+data$examiner_name_first
+
+examiner_names_gender <- examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(
+    examiner_name_first = name,
+    gender,
+    proportion_female
+  )
+
+
+examiner_names_gender
+```
+In this part, we joined the gender data obtained in the previous step into the main dataset.
+
+```{r}
+# remove extra colums from the gender table
+examiner_names_gender <- examiner_names_gender %>% 
+  select(examiner_name_first, gender)
+
+# joining gender back to the dataset
+data <- data %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+
+# cleaning up
+rm(examiner_names)
+rm(examiner_names_gender)
+gc()
+```
+## Obtaining the race of the examiner
+
+Based on the last name, and using the `wru` package, we identified the probability of the examiner to be of an specific race among Asian, Black, Hispanic and other.
+
+```{r}
+library(wru)
+
+examiner_surnames <- data %>% 
+  select(surname = examiner_name_last) %>% 
+  distinct()
+
+examiner_surnames
+```
+
+
+
+```{r}
+examiner_race <- predict_race(voter.file = examiner_surnames, surname.only = T) %>% 
+  as_tibble()
+examiner_race
+```
+
+```{r}
+examiner_race <- examiner_race %>% 
+  mutate(max_race_p = pmax(pred.asi, pred.bla, pred.his, pred.oth, pred.whi)) %>% 
+  mutate(race = case_when(
+    max_race_p == pred.asi ~ "Asian",
+    max_race_p == pred.bla ~ "black",
+    max_race_p == pred.his ~ "Hispanic",
+    max_race_p == pred.oth ~ "other",
+    max_race_p == pred.whi ~ "white",
+    TRUE ~ NA_character_
+  ))
+
+examiner_race
+```
+
+On this step, we cleaned the dataset removing extra columns
+
+```{r}
+# removing extra columns
+examiner_race <- examiner_race %>% 
+  select(surname,race)
+
+data <- data %>% 
+  left_join(examiner_race, by = c("examiner_name_last" = "surname"))
+
+rm(examiner_race)
+rm(examiner_surnames)
+gc()
+```
+
+
+```{r}
+library(lubridate) # to work with dates
+
+examiner_dates <- data %>% 
+  select(examiner_id, filing_date, appl_status_date) 
+
+examiner_dates
+```
+
+
+```{r}
+examiner_dates <- examiner_dates %>% 
+  mutate(start_date = ymd(filing_date), end_date = as_date(dmy_hms(appl_status_date)))
+```
+
+After the cleaning and preprocessing steps, we grouped the data at a examiner level. This would allow us to perform a regression models
+
+```{r}
+examiner_dates <- examiner_dates %>% 
+  group_by(examiner_id) %>% 
+  summarise(
+    earliest_date = min(start_date, na.rm = TRUE), 
+    latest_date = max(end_date, na.rm = TRUE),
+    tenure_days = interval(earliest_date, latest_date) %/% days(1)
+    ) %>% 
+  filter(year(latest_date)<2018)
+
+examiner_dates
+```
+
+```{r}
+data <- data %>% 
+  left_join(examiner_dates, by = "examiner_id")
+
+rm(examiner_dates)
+gc()
+```
+```{r}
+data
+data <- data %>%
+  select(
+    application_number,
+    filing_date,
+    examiner_name_last,
+    examiner_name_first,
+    examiner_name_middle,
+    examiner_id,
+    examiner_art_unit,
+    uspc_class,
+    uspc_subclass,
+    patent_number,
+    patent_issue_date,
+    abandon_date,
+    disposal_type,
+    appl_status_code,
+    appl_status_date,
+    tc,
+    gender = gender.y,  # Renaming the column to remove the suffix
+    race = race.y,      # Renaming the column to remove the suffix
+    earliest_date = earliest_date.y,  # Renaming the column to remove the suffix
+    latest_date = latest_date.y,  # Renaming the column to remove the suffix
+    tenure_days = tenure_days.y   # Renaming the column to remove the suffix
+  )
+data
+```
+
+
+# Task 2: Create a panel dataset
+# ------------------------------
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(zoo)
+
+# Convert dates to quarters
+data <- data %>%
+  mutate(
+    filing_year_quarter = as.yearqtr(filing_date),
+    abandon_year_quarter = as.yearqtr(abandon_date),
+    issue_year_quarter = as.yearqtr(patent_issue_date)
+  )
+
+# Aggregate applications data by quarter
+panel_data <- data %>%
+  group_by(examiner_id, filing_year_quarter) %>%
+  summarise(
+    num_new_applications = n_distinct(application_number),
+    num_abandoned_applications = sum(disposal_type == "ABN", na.rm = TRUE),
+    num_issued_patents = sum(disposal_type == "ISS", na.rm = TRUE),
+    num_in_process_applications = sum(disposal_type == "PEND", na.rm = TRUE),
+    current_art_unit = first(examiner_art_unit),
+    .groups = 'drop'
+  )
+
+# Add the count of people and women in each art unit per quarter
+art_unit_info <- data %>%
+  group_by(filing_year_quarter, examiner_art_unit) %>%
+  summarise(
+    num_people_in_art_unit = n_distinct(examiner_id),
+    num_women_in_art_unit = sum(gender == "female", na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Join the art unit info with the main panel data
+panel_data <- panel_data %>%
+  left_join(art_unit_info, by = c("filing_year_quarter", "current_art_unit" = "examiner_art_unit"))
+
+# Mark the last five quarters for each examiner
+panel_data <- panel_data %>%
+  group_by(examiner_id) %>%
+  mutate(
+    # Get a list of the last five quarters of activity for each examiner
+    last_five_quarters = list(tail(sort(unique(filing_year_quarter)), 5))
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Check if the current quarter is in the last five quarters of activity
+    separation_indicator = if_else(map_lgl(filing_year_quarter, ~ .x %in% last_five_quarters[[1]]), 1, 0)
+  )
+
+
+# Detect changes in current_art_unit
+panel_data <- panel_data %>%
+  group_by(examiner_id) %>%
+  mutate(
+    # If the current art unit is different from the previous one, it's a move (1), otherwise, it's not (0).
+    # For the first row of each examiner (where there is no "previous" art unit), use NA as the default value.
+    AU_move_indicator = if_else(current_art_unit != lag(current_art_unit, default = NA), 1, 0)
+  ) %>%
+  mutate(
+    # Replace NA with 0 - assumes that the first observation is not a move.
+    AU_move_indicator = replace_na(AU_move_indicator, 0)
+  ) %>%
+  ungroup()
+
+
+
+
+```
+
+
+
+```{r}
+table(panel_data$separation_indicator)
+table(panel_data$AU_move_indicator)
+
+```
+
+
+# Task 3: Estimate predictors for turnover and mobility
+# ---------------------------------------------------
+
+
+```{r}
+# Prepare the data for regression
+regression_data <- panel_data %>%
+  filter(num_new_applications > 0)
+
+# Regression model for Turnover
+turnover_model <- glm(separation_indicator ~  num_new_applications + num_abandoned_applications + 
+                      num_issued_patents +  
+                      num_people_in_art_unit + num_women_in_art_unit,
+                    family = binomial(), data = regression_data)
+
+# Regression model for Mobility (AU Move)
+mobility_model <- glm(AU_move_indicator ~ num_new_applications + num_abandoned_applications +
+                      num_issued_patents + num_in_process_applications + 
+                      num_people_in_art_unit + num_women_in_art_unit,
+                    family = binomial(), data = regression_data)
+
+# Create descriptive tables for both models
+turnover_table_ <- tbl_regression(turnover_model)
+
+turnover_table_
+```
+
+Showing the models
+
+```{r}
+turnover_model
+```
+
+
+```{r}
+mobility_mode_ <- tbl_regression(mobility_model)
+print(mobility_mode_)
+```
+
+
+```{r}
+mobility_model
+```
+
+
+
+
