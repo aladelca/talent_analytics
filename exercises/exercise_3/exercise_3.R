@@ -86,7 +86,7 @@ examiner_data = panel_data %>%
                     total_abandoned_applications = sum(num_abandoned_applications),
                     mean_issued_patents_qt = mean(num_issued_patents),
                     total_issued_patents = sum(num_issued_patents),
-                    mean_in_process_applications_qt = mean(num_in_process_applications),
+                    #mean_in_process_applications_qt = mean(num_in_process_applications),
                     separation_indicator = max(separation_indicator)
                   )
 
@@ -113,8 +113,9 @@ final_data = final_data %>%
                 
 final_data = final_data %>% select(-c('examiner_id'))
 
-final_data$separation_indicator = as.factor(final_data$separation_indicator)
-write_feather(final_data, paste0(data_path,"final_data.feather"))
+#final_data$separation_indicator = as.factor(final_data$separation_indicator)
+#write_feather(final_data, paste0(data_path,"final_data.feather"))
+
 
 #### Train test split
 set.seed(123)
@@ -130,33 +131,34 @@ test_data = final_data[-splitIndex, ]
 logistic_model = glm(separation_indicator ~ ., data = train_data, family = "binomial", maxit = 1000)
 summary(logistic_model)
 
-
-
 logistic_predictions_probas = predict(logistic_model, test_data, type = 'response')
 predictions = ifelse(logistic_predictions_probas>0.5,1,0)
-
 
 conf_matrix = confusionMatrix(table(predictions, test_data$separation_indicator))
 conf_matrix_data = as.matrix(conf_matrix$table)
 
 
-roc_curve = roc(test_data$separation_indicator, predictions)
+roc_curve = roc(test_data$separation_indicator, logistic_predictions_probas)
 roc_plot = plot(roc_curve, main = "ROC Curve", col = "blue")
 auc(roc_curve)
 
-rf_model = randomForest(separation_indicator ~., data = train_data)
+rf_model = randomForest(separation_indicator ~., data = train_data, class.f = TRUE)
 
-predictions_rf = predict(rf_model, test_data)
-
+predictions_rf = predict(rf_model, test_data, type = "response")
+predictions_rf
 
 conf_matrix_rf = confusionMatrix(table(predictions_rf, test_data$separation_indicator))
 conf_matrix_data_rf = as.matrix(conf_matrix_rf$table)
 
 
-roc_curve_rf = roc(test_data$separation_indicator, ifelse(predictions_rf==0,0,1))
+roc_curve_rf = roc(test_data$separation_indicator, predictions_rf)
 roc_plot_rf = plot(roc_curve_rf, main = "ROC Curve", col = "blue")
 auc(roc_curve_rf)
 
 ggroc(list(logistic = roc_curve, random_forest = roc_curve_rf))+
   labs(title = "Comparison of two models")
+
+print(auc(roc_curve))
+
+
 

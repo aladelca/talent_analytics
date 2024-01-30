@@ -1,0 +1,289 @@
+---
+title: "Exercise 3"
+output:
+  word_document: default
+  pdf_document:
+    latex_engine: pdflatex
+  html_document: default
+  always_allow_html: true
+---
+Team members:
+
+* Tashfeen Ahmed
+* Adrian Alarcon
+* Yvan Kammelu
+* Zhicheng Zhong
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(kableExtra)
+library(ggplot2)
+library(tidyverse)
+library(arrow)
+library(broom)
+library(gender)
+library(wru)
+library(lubridate)
+library(dplyr)
+library(gtsummary)
+library(zoo)
+library(purrr)
+library(wru)
+library(lubridate)
+library(caret)
+library(pROC)
+library(gplots)
+library(randomForest)
+```
+
+## Data Preparation
+
+### Data Source
+To do this exercise, we will use the dataset produced in this [file](https://github.com/romangalperin/2024-talent-analytics/blob/main/exercises/ex2_starter.md). This was the base of the previous exercise.
+
+
+```{r, echo=FALSE}
+applications = arrow::read_feather('app_data_starter_coded.feather')
+data_subset = head(applications, 5)
+data_subset = data_subset[,1:5]
+
+kable(data_subset, format = "latex", booktabs = TRUE, longtable = FALSE, caption = "Initial data") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+
+
+
+### Aggregating at quarterly level
+
+First, to start this exercise, the dataset has been aggregated at quarter level
+
+```{r, echo=FALSE}
+applications = applications %>%
+  mutate(
+    filing_year_quarter = as.yearqtr(filing_date),
+    abandon_year_quarter = as.yearqtr(abandon_date),
+    issue_year_quarter = as.yearqtr(patent_issue_date)
+  )
+```
+
+### Variable generation
+
+Then, we generate variables at quarter level, including `new_applications`, `abandoned_applications`, `patents_issued`, `in_process_applications` an `current_art_unit`.
+
+```{r, echo=FALSE}
+panel_data = applications %>%
+  group_by(examiner_id, filing_year_quarter) %>%
+  summarise(
+    num_new_applications = n_distinct(application_number),
+    num_abandoned_applications = sum(disposal_type == "ABN", na.rm = TRUE),
+    num_issued_patents = sum(disposal_type == "ISS", na.rm = TRUE),
+    num_in_process_applications = sum(disposal_type == "PEND", na.rm = TRUE),
+    current_art_unit = first(examiner_art_unit),
+    .groups = 'drop'
+  )
+
+data_subset = head(panel_data, 5)
+data_subset = data_subset[,1:5]
+kable(data_subset, format = "latex", booktabs = TRUE, longtable = FALSE, caption = "Panel data") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+After generating those variables, variables about art unit were generated, considering `number_of_woman` and `number_people_art_unit`.
+
+```{r, echo=TRUE}
+
+art_unit_info = applications %>%
+  group_by(filing_year_quarter, examiner_art_unit) %>%
+  summarise(
+    num_people_in_art_unit = n_distinct(examiner_id),
+    num_women_in_art_unit = sum(gender.x == "female", na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+
+panel_data =  panel_data %>%
+  left_join(art_unit_info, by = c("filing_year_quarter", "current_art_unit" = "examiner_art_unit"))
+
+
+```
+
+### Generating target variables
+
+By comparing the last 5 quarters, we generated target variable: `separation_indicator`, which means that the examiner left the company
+
+```{r, echo=TRUE}
+
+panel_data = panel_data %>%
+  group_by(examiner_id) %>%
+  mutate(
+    # Get a list of the last five quarters of activity for each examiner
+    last_five_quarters = list(tail(sort(unique(filing_year_quarter)), 5))
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Check if the current quarter is in the last five quarters of activity
+    separation_indicator = if_else(map_lgl(filing_year_quarter, ~ .x %in% last_five_quarters[[1]]), 1, 0)
+  )
+
+```
+
+### Aggregate data at examiner level
+
+What the model will predict is if an examiner is going to leave the company. To achieve this, we need to aggregate the data at examiner level. Additionally, performance variables were created including the average of the applications issued per quarter, the average of the abandoned applications, and the totals of each variables.
+
+
+```{r, echo=TRUE}
+examiner_data = panel_data %>% 
+                  group_by(examiner_id) %>% 
+                  summarise(
+                    #mean_new_applications_qt = mean(num_new_applications),
+                    #total_new_applications_qt = sum(num_new_applications),
+                    mean_abandoned_applications_qt = mean(num_abandoned_applications),
+                    #total_abandoned_applications = sum(num_abandoned_applications),
+                    mean_issued_patents_qt = mean(num_issued_patents),
+                    #total_issued_patents = sum(num_issued_patents),
+                    mean_in_process_applications_qt = mean(num_in_process_applications),
+                    separation_indicator = max(separation_indicator)
+                  )
+
+examiner_data_info = applications %>% group_by(examiner_id) %>% 
+                        summarise(
+                          gender = max(gender.x),
+                          race = max(race.x),
+                          mean_tenure = mean(tenure_days.x)
+                          )
+
+examiner_data_final = merge(examiner_data, examiner_data_info, by = 'examiner_id', all = TRUE)
+
+```
+
+Since there are some data without `examiner_id`, we filtered those values where that field showed NULL values
+```{r, echo=TRUE}
+examiner_data_final = examiner_data_final %>% 
+                        filter(!is.na(!!sym('examiner_id')))
+
+```
+
+### Handling categorical variables
+
+Since there are two categorical variables: `race` and `gender`, it was necessary to handle them. To do this, one hot encoding was performed.
+
+Because of NULL values in `gender`, for those rows, the dummy vars would be 0.
+
+Finally, we drop `examiner_id` since it is an id and it should not enter into the predictive modeling
+
+```{r, echo=TRUE}
+final_data = predict(dummyVars('~.', data = examiner_data_final), newdata = examiner_data_final)
+
+final_data = data.frame(final_data)
+
+
+final_data = final_data %>% 
+                mutate(genderfemale = ifelse(is.na(genderfemale),0,genderfemale),
+                       gendermale = ifelse(is.na(gendermale),0,gendermale))
+                
+final_data = final_data %>% select(-c('examiner_id'))
+#final_data$separation_indicator = as.factor(final_data$separation_indicator)
+data_subset = head(final_data, 5)
+data_subset = data_subset[,1:5]
+kable(data_subset, format = "latex", booktabs = TRUE, longtable = FALSE, caption = "Final data") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+## Modeling
+
+For modeling purposes, we decided to experiment with two algorithms:
+
+* Logistic Regression
+* Random Forest
+
+To evaluate metrics, we splited the dataset into two subdatasets: one for training purposes, containing 70% of the data, and one for test purposes, that is going to be used to validate metrics.
+
+```{r, echo=TRUE}
+set.seed(123)
+splitIndex = createDataPartition(final_data$separation_indicator, p = 0.7, list = FALSE)
+
+# Create training set
+train_data = final_data[splitIndex, ]
+
+# Create testing set
+test_data = final_data[-splitIndex, ]
+
+```
+
+### Logistic Regression
+
+Here it is showed the results of the logistic regression
+```{r, echo=TRUE}
+logistic_model = glm(separation_indicator ~ ., data = train_data, family = "binomial", maxit = 1000)
+summary(logistic_model)
+
+logistic_predictions_probas = predict(logistic_model, test_data, type = 'response')
+predictions = ifelse(logistic_predictions_probas>0.5,1,0)
+
+```
+
+Confusion matrix for logistic regression:
+
+```{r, echo=TRUE}
+conf_matrix = confusionMatrix(table(predictions, test_data$separation_indicator))
+conf_matrix_data = as.matrix(conf_matrix$table)
+print(conf_matrix_data)
+```
+
+ROC Curve and AUC for logistic regression
+```{r, echo=TRUE}
+
+roc_curve = roc(test_data$separation_indicator, logistic_predictions_probas)
+roc_plot = plot(roc_curve, main = "ROC Curve", col = "blue")
+print(auc(roc_curve))
+roc_plot
+
+```
+
+### RandomForest
+
+Here it is showed the results of the Random Forest
+
+```{r, echo=TRUE}
+rf_model = randomForest(separation_indicator ~., data = train_data, class.f = TRUE)
+
+predictions_rf = predict(rf_model, test_data, type = 'response')
+```
+
+
+Confusion matrix for Random Forest
+
+
+```{r, echo=TRUE}
+conf_matrix_rf = confusionMatrix(table(ifelse(predictions_rf>0.5,1,0), test_data$separation_indicator))
+conf_matrix_data_rf = as.matrix(conf_matrix_rf$table)
+print(conf_matrix_data_rf)
+```
+
+ROC Curve and AUC for Random Forest
+
+```{r, echo=TRUE}
+roc_curve_rf = roc(test_data$separation_indicator, predictions_rf)
+roc_plot_rf = plot(roc_curve_rf, main = "ROC Curve", col = "skyblue")
+print(auc(roc_curve_rf))
+roc_plot_rf
+```
+
+
+## Comparing models
+
+Here a comparison in terms of ROC curve
+```{r, echo=TRUE}
+
+ggroc(list(logistic = roc_curve, random_forest = roc_curve_rf))+
+  labs(title = "Comparison of two models")
+print('Logistic Regression:')
+print(auc(roc_curve))
+print('Random Forest:')
+print(auc(roc_curve_rf))
+```
